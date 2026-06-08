@@ -5,6 +5,11 @@ import { QRCodeCanvas } from 'qrcode.react'
 import Barcode from 'react-barcode'
 import { createRoot } from 'react-dom/client'
 
+// J&T Express Brand Colors
+const JT_RED = '#e31a1a'
+const JT_WHITE = '#ffffff'
+const JT_LIGHT_RED = '#fff5f5'
+
 export default function App() {
   const [bags, setBags] = useState([])
   const [selectedBag, setSelectedBag] = useState(null)
@@ -46,7 +51,10 @@ export default function App() {
   async function loadBags() {
     const { data, error } = await supabase
       .from('bags')
-      .select('*')
+      .select(`
+        *,
+        bag_items (count)
+      `)
       .order('created_at', { ascending: false })
 
     if (error) {
@@ -54,7 +62,12 @@ export default function App() {
       return
     }
 
-    setBags(data)
+    const bagsWithCounts = data.map(bag => ({
+      ...bag,
+      item_count: bag.bag_items[0]?.count || 0
+    }))
+
+    setBags(bagsWithCounts)
   }
 
   async function loadBagItems(bagId) {
@@ -70,6 +83,7 @@ export default function App() {
     }
 
     setBagItems(data || [])
+    await loadBags()
   }
 
   function generateBagCode() {
@@ -146,7 +160,6 @@ export default function App() {
       return
     }
 
-    // Duplicate check in current bag
     const isDuplicate = bagItems.some(i => i.item_id === code)
     if (isDuplicate) {
       addActivity(`Already in current bag: ${code}`)
@@ -213,6 +226,8 @@ export default function App() {
     }
     if (selectedBag) {
       await loadBagItems(selectedBag.id)
+    } else {
+      await loadBags()
     }
   }
 
@@ -262,6 +277,8 @@ export default function App() {
     }
     if (selectedBag) {
       await loadBagItems(selectedBag.id)
+    } else {
+      await loadBags()
     }
   }
 
@@ -340,7 +357,6 @@ export default function App() {
       timeZone: 'Asia/Jakarta'
     })
 
-    // Prepare the print document structure
     printWindow.document.write(`
       <!DOCTYPE html>
       <html>
@@ -384,12 +400,10 @@ export default function App() {
       </html>
     `)
 
-    // We need to render the barcodes into the new window's DOM
     const qrRoot = printWindow.document.getElementById('qr-code')
     const barcodeRoot = printWindow.document.getElementById('barcode')
 
     if (qrRoot && barcodeRoot) {
-      // Use React to render components into the print window's containers
       const qrReactRoot = createRoot(qrRoot)
       qrReactRoot.render(<QRCodeCanvas value={bag.bag_code} size={150} />)
 
@@ -405,7 +419,6 @@ export default function App() {
         />
       )
       
-      // Give it a small delay to ensure rendering before printing
       setTimeout(() => {
         printWindow.print()
         printWindow.close()
@@ -476,26 +489,59 @@ export default function App() {
     )
   ]
 
+  const buttonStyle = {
+    padding: '10px 20px',
+    backgroundColor: JT_RED,
+    color: JT_WHITE,
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontWeight: 'bold',
+    transition: 'opacity 0.2s'
+  }
+
+  const secondaryButtonStyle = {
+    ...buttonStyle,
+    backgroundColor: '#6c757d'
+  }
+
+  const cardStyle = {
+    padding: '15px',
+    backgroundColor: JT_WHITE,
+    border: `1px solid #dee2e6`,
+    borderRadius: '8px',
+    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+    marginBottom: '20px'
+  }
+
   return (
-    <div style={{ padding: 20, fontFamily: 'sans-serif', maxWidth: '800px', margin: '0 auto' }}>
-      <h1>Warehouse</h1>
+    <div style={{ padding: 20, fontFamily: 'sans-serif', maxWidth: '800px', margin: '0 auto', backgroundColor: '#fdfdfd', minHeight: '100vh' }}>
+      
+      {/* Header with Logo */}
+      <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+        <img 
+          src="https://files.manuscdn.com/user_upload_by_module/session_file/310519663698114786/KWpQrPdQFZsxLHLR.jpg" 
+          alt="J&T Express Talang" 
+          style={{ maxWidth: '250px', height: 'auto' }} 
+        />
+        <h1 style={{ color: JT_RED, marginTop: '10px', fontSize: '1.2rem', textTransform: 'uppercase', letterSpacing: '1px' }}>
+          Warehouse Management System
+        </h1>
+      </div>
 
       {/* Current Bag Panel */}
       <div style={{ 
-        padding: '15px', 
-        backgroundColor: '#f8f9fa', 
-        border: '1px solid #dee2e6', 
-        borderRadius: '8px',
-        marginBottom: '20px'
+        ...cardStyle,
+        borderLeft: `5px solid ${JT_RED}`
       }}>
-        <h2 style={{ marginTop: 0 }}>Current Bag</h2>
+        <h2 style={{ marginTop: 0, color: JT_RED, fontSize: '1.1rem' }}>Current Bag</h2>
         {selectedBag ? (
           <div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#007bff' }}>
+            <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#333' }}>
               {selectedBag.bag_code}
             </div>
-            <div style={{ marginTop: '5px' }}>
-              Items: <strong>{bagItems.length}</strong>
+            <div style={{ marginTop: '5px', color: '#666' }}>
+              Items: <strong style={{ color: JT_RED }}>{bagItems.length}</strong>
             </div>
           </div>
         ) : (
@@ -506,7 +552,7 @@ export default function App() {
       <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
         <button 
           onClick={createBag}
-          style={{ padding: '10px 20px', backgroundColor: '#28a745', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+          style={{ ...buttonStyle, backgroundColor: '#28a745' }}
         >
           Create Bag
         </button>
@@ -514,14 +560,14 @@ export default function App() {
         {!isScanning ? (
           <button 
             onClick={startScanner}
-            style={{ padding: '10px 20px', backgroundColor: '#007bff', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+            style={buttonStyle}
           >
             Scan
           </button>
         ) : (
           <button 
             onClick={stopScanner}
-            style={{ padding: '10px 20px', backgroundColor: '#dc3545', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+            style={{ ...buttonStyle, backgroundColor: '#dc3545' }}
           >
             Close Scanner
           </button>
@@ -531,14 +577,14 @@ export default function App() {
           !scanItemMode ? (
             <button 
               onClick={() => setScanItemMode(true)}
-              style={{ padding: '10px 20px', backgroundColor: '#ffc107', color: '#000', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              style={{ ...buttonStyle, backgroundColor: '#ffc107', color: '#000' }}
             >
               Start Scan Item Mode
             </button>
           ) : (
             <button 
               onClick={() => setScanItemMode(false)}
-              style={{ padding: '10px 20px', backgroundColor: '#6c757d', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              style={secondaryButtonStyle}
             >
               Stop Scan Item Mode
             </button>
@@ -548,47 +594,48 @@ export default function App() {
 
       {scanItemMode && (
         <div style={{ 
-          padding: '10px', 
-          backgroundColor: '#fff3cd', 
-          border: '1px solid #ffeeba', 
+          padding: '12px', 
+          backgroundColor: JT_LIGHT_RED, 
+          border: `1px solid ${JT_RED}`, 
           borderRadius: '4px', 
           marginBottom: '20px',
           fontWeight: 'bold',
           textAlign: 'center',
-          color: '#856404'
+          color: JT_RED,
+          boxShadow: '0 0 10px rgba(227, 26, 26, 0.1)'
         }}>
           ⚠️ SCAN ITEM MODE ACTIVE
         </div>
       )}
 
       {isScanning && (
-        <div style={{ width: '100%', marginBottom: '20px', border: '2px solid #007bff', borderRadius: '8px', overflow: 'hidden' }}>
+        <div style={{ width: '100%', marginBottom: '20px', border: `2px solid ${JT_RED}`, borderRadius: '8px', overflow: 'hidden' }}>
           <div id="reader" style={{ width: '100%' }}></div>
         </div>
       )}
 
       <div style={{ display: 'flex', gap: '20px', flexDirection: window.innerWidth < 600 ? 'column' : 'row' }}>
         <div style={{ flex: 1 }}>
-          <h2>Batch Search</h2>
+          <h2 style={{ color: JT_RED, fontSize: '1.1rem' }}>Batch Search</h2>
           <textarea
             rows={4}
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
             placeholder="Scan or type item IDs (one per line)"
-            style={{ width: '100%', padding: '10px', boxSizing: 'border-box' }}
+            style={{ width: '100%', padding: '10px', boxSizing: 'border-box', border: '1px solid #ddd', borderRadius: '4px' }}
           />
           <button
             onClick={() => searchItems()}
-            style={{ marginTop: 8, width: '100%', padding: '10px' }}
+            style={{ ...buttonStyle, marginTop: 8, width: '100%' }}
           >
             Search
           </button>
 
           {searchResults.length > 0 && (
             <div style={{ marginTop: 20 }}>
-              <h3>Results</h3>
+              <h3 style={{ fontSize: '1rem' }}>Results</h3>
               <div style={{ marginBottom: 10 }}>
-                <label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
                     checked={
@@ -603,21 +650,22 @@ export default function App() {
                       }
                     }}
                   />
-                  {' '} Select All Found
+                  Select All Found
                 </label>
               </div>
 
               {searchResults.map(result => (
                 <div key={result.item_id} style={{
-                  padding: '8px',
-                  marginBottom: '4px',
-                  backgroundColor: result.bag ? '#e8f5e9' : '#ffebee',
-                  border: '1px solid #ccc',
+                  padding: '10px',
+                  marginBottom: '6px',
+                  backgroundColor: result.bag ? '#e8f5e9' : '#fff5f5',
+                  border: `1px solid ${result.bag ? '#c8e6c9' : '#ffcdd2'}`,
+                  borderRadius: '4px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between'
                 }}>
-                  <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     {result.bag && (
                       <input
                         type="checkbox"
@@ -629,18 +677,22 @@ export default function App() {
                             setSelectedResults(selectedResults.filter(x => x !== result.item_id))
                           }
                         }}
-                        style={{ marginRight: 8 }}
                       />
                     )}
                     <strong>{result.item_id}</strong>
-                    {' → '}
-                    {result.bag ? result.bag.bag_code : <span style={{ color: 'red', fontWeight: 'bold' }}>NOT FOUND</span>}
+                    <span style={{ color: '#666' }}>→</span>
+                    {result.bag ? 
+                      <span style={{ fontWeight: 'bold', color: '#2e7d32' }}>{result.bag.bag_code}</span> : 
+                      <span style={{ color: JT_RED, fontWeight: 'bold' }}>NOT FOUND</span>
+                    }
                   </div>
                   {result.bag && (
-                    <button onClick={() => {
-                      setHighlightItems([result.item_id])
-                      openBag(result.bag)
-                    }}>Open</button>
+                    <button 
+                      onClick={() => { setHighlightItems([result.item_id]); openBag(result.bag); }}
+                      style={{ padding: '4px 10px', backgroundColor: JT_WHITE, border: `1px solid ${JT_RED}`, color: JT_RED, borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
+                    >
+                      Open
+                    </button>
                   )}
                 </div>
               ))}
@@ -649,7 +701,7 @@ export default function App() {
                 <button
                   onClick={removeSelectedItems}
                   disabled={selectedResults.length === 0}
-                  style={{ width: '100%', padding: '10px' }}
+                  style={{ ...buttonStyle, width: '100%', opacity: selectedResults.length === 0 ? 0.5 : 1 }}
                 >
                   Remove Selected ({selectedResults.length})
                 </button>
@@ -660,21 +712,22 @@ export default function App() {
 
         {/* Recent Activity Panel */}
         <div style={{ flex: 1, minWidth: '250px' }}>
-          <h2>Recent Activity</h2>
+          <h2 style={{ color: JT_RED, fontSize: '1.1rem' }}>Recent Activity</h2>
           <div style={{ 
             height: '300px', 
             overflowY: 'auto', 
-            border: '1px solid #ccc', 
+            border: '1px solid #eee', 
             padding: '10px',
-            backgroundColor: '#fff',
-            borderRadius: '4px'
+            backgroundColor: JT_WHITE,
+            borderRadius: '4px',
+            boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.05)'
           }}>
             {recentActivity.length === 0 ? (
               <div style={{ color: '#999', textAlign: 'center', marginTop: '50px' }}>No recent activity</div>
             ) : (
               recentActivity.map(act => (
-                <div key={act.id} style={{ fontSize: '0.9rem', padding: '5px 0', borderBottom: '1px solid #eee' }}>
-                  <span style={{ color: '#999', fontSize: '0.8rem' }}>[{act.time}]</span> {act.text}
+                <div key={act.id} style={{ fontSize: '0.85rem', padding: '6px 0', borderBottom: '1px solid #f9f9f9' }}>
+                  <span style={{ color: '#aaa', fontSize: '0.75rem' }}>[{act.time}]</span> {act.text}
                 </div>
               ))
             )}
@@ -682,28 +735,48 @@ export default function App() {
         </div>
       </div>
 
-      <h2>Bags</h2>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '10px' }}>
+      <h2 style={{ color: JT_RED, fontSize: '1.1rem', marginTop: '30px' }}>Bags</h2>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '15px' }}>
         {bags.map((bag) => (
           <div key={bag.id} style={{
-            padding: '12px',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            backgroundColor: selectedBag?.id === bag.id ? '#e7f3ff' : '#fff'
+            ...cardStyle,
+            marginBottom: 0,
+            borderTop: selectedBag?.id === bag.id ? `4px solid ${JT_RED}` : '1px solid #dee2e6',
+            backgroundColor: selectedBag?.id === bag.id ? JT_LIGHT_RED : JT_WHITE
           }}>
-            <strong>{bag.bag_code}</strong>
-            <div style={{ marginTop: '10px', display: 'flex', gap: '5px' }}>
-              <button onClick={() => { setHighlightItems([]); openBag(bag); }}>Open</button>
-              <button onClick={() => printBag(bag)}>Print</button>
+            <strong style={{ fontSize: '1rem' }}>{bag.bag_code}</strong>
+            <div style={{ color: '#666', fontSize: '0.9rem', marginTop: '4px' }}>
+              Items: <span style={{ color: JT_RED, fontWeight: 'bold' }}>{bag.item_count}</span>
+            </div>
+            <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
+              <button 
+                onClick={() => { setHighlightItems([]); openBag(bag); }}
+                style={{ flex: 1, padding: '6px', backgroundColor: JT_WHITE, border: `1px solid ${JT_RED}`, color: JT_RED, borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                Open
+              </button>
+              <button 
+                onClick={() => printBag(bag)}
+                style={{ flex: 1, padding: '6px', backgroundColor: '#eee', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              >
+                Print
+              </button>
             </div>
           </div>
         ))}
       </div>
 
       {selectedBag && (
-        <div style={{ marginTop: 30, padding: 16, border: '2px solid #333', borderRadius: '8px' }}>
-          <h2>Bag: {selectedBag.bag_code}</h2>
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+        <div style={{ 
+          marginTop: 40, 
+          padding: 20, 
+          border: `2px solid ${JT_RED}`, 
+          borderRadius: '12px',
+          backgroundColor: JT_WHITE,
+          boxShadow: '0 4px 20px rgba(227, 26, 26, 0.08)'
+        }}>
+          <h2 style={{ color: JT_RED, marginTop: 0 }}>Bag: {selectedBag.bag_code}</h2>
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
             <input
               ref={itemInputRef}
               type="text"
@@ -711,27 +784,41 @@ export default function App() {
               value={itemCode}
               onChange={(e) => setItemCode(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && addItemToBag()}
-              style={{ flex: 1, padding: '8px' }}
+              style={{ flex: 1, padding: '12px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '1rem' }}
             />
-            <button onClick={() => addItemToBag()}>Add Item</button>
+            <button 
+              onClick={() => addItemToBag()}
+              style={{ ...buttonStyle, padding: '0 25px' }}
+            >
+              Add Item
+            </button>
           </div>
 
-          <h3>Items ({bagItems.length})</h3>
+          <h3 style={{ fontSize: '1.1rem', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>
+            Items ({bagItems.length})
+          </h3>
           <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
             {sortedBagItems.map(item => {
               const highlighted = highlightItems.includes(item.item_id)
               return (
                 <div key={item.item_id} style={{
-                  padding: '8px',
+                  padding: '10px',
                   marginBottom: '4px',
-                  backgroundColor: highlighted ? '#fff3cd' : 'transparent',
+                  backgroundColor: highlighted ? '#fff9c4' : 'transparent',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
-                  borderBottom: '1px solid #eee'
+                  borderBottom: '1px solid #f0f0f0'
                 }}>
-                  <span>{highlighted && '⭐ '} {item.item_id}</span>
-                  <button onClick={() => removeItem(item.item_id)}>Remove</button>
+                  <span style={{ fontWeight: highlighted ? 'bold' : 'normal' }}>
+                    {highlighted && '⭐ '} {item.item_id}
+                  </span>
+                  <button 
+                    onClick={() => removeItem(item.item_id)}
+                    style={{ padding: '4px 10px', backgroundColor: JT_WHITE, border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
+                  >
+                    Remove
+                  </button>
                 </div>
               )
             })}
@@ -741,14 +828,15 @@ export default function App() {
 
       {showUndo && lastRemoved.length > 0 && (
         <div style={{
-          position: 'fixed', bottom: 20, right: 20, background: '#333', color: '#fff',
-          padding: '12px 20px', borderRadius: '8px', zIndex: 1000, boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-          display: 'flex', alignItems: 'center', gap: '15px'
+          position: 'fixed', bottom: 30, left: '50%', transform: 'translateX(-50%)', 
+          background: '#333', color: '#fff', padding: '15px 25px', borderRadius: '50px', 
+          zIndex: 1000, boxShadow: '0 8px 25px rgba(0,0,0,0.4)',
+          display: 'flex', alignItems: 'center', gap: '20px', minWidth: '300px', justifyContent: 'center'
         }}>
-          <span>Removed {lastRemoved.length} item(s)</span>
+          <span style={{ fontWeight: 'bold' }}>Removed {lastRemoved.length} item(s)</span>
           <button onClick={undoRemove} style={{
-            padding: '5px 12px', backgroundColor: '#fff', color: '#333', border: 'none',
-            borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold'
+            padding: '6px 20px', backgroundColor: JT_RED, color: '#fff', border: 'none',
+            borderRadius: '20px', cursor: 'pointer', fontWeight: 'bold', textTransform: 'uppercase', fontSize: '0.8rem'
           }}>Undo</button>
         </div>
       )}

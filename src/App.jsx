@@ -27,6 +27,13 @@ export default function App() {
   const [recentActivity, setRecentActivity] = useState([])
   const [importStats, setImportStats] = useState(null)
   
+  // New states for Shipment Lookup
+  const [senderParcels, setSenderParcels] = useState(null)
+  const [viewingSender, setViewingSender] = useState('')
+
+  // UI State
+  const [isItemsExpanded, setIsItemsExpanded] = useState(false)
+  
   const itemInputRef = useRef(null)
   const undoTimerRef = useRef(null)
   const scannerRef = useRef(null)
@@ -131,6 +138,7 @@ export default function App() {
     setSelectedBag(bag)
     await loadBagItems(bag.id)
     addActivity(`Opened bag: ${bag.bag_code}`)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   async function openBagByCode(bagCode) {
@@ -153,19 +161,19 @@ export default function App() {
   async function addItemToBag(codeToUse) {
     const targetBag = selectedBag
     if (!targetBag) {
-      addActivity('Error: Open a bag first')
+      addActivity('Error: Buka karung terlebih dahulu')
       return
     }
 
     const code = (codeToUse || itemCode).trim()
     if (!code) {
-      addActivity('Error: Enter item ID')
+      addActivity('Error: Masukkan ID barang')
       return
     }
 
     const isDuplicate = bagItems.some(i => i.item_id === code)
     if (isDuplicate) {
-      addActivity(`Already in current bag: ${code}`)
+      addActivity(`Sudah ada di karung saat ini: ${code}`)
       setItemCode('')
       return
     }
@@ -193,7 +201,7 @@ export default function App() {
       return
     }
 
-    addActivity(`Added: ${code}`)
+    addActivity(`Ditambahkan: ${code}`)
     setItemCode('')
     await loadBagItems(targetBag.id)
 
@@ -217,7 +225,7 @@ export default function App() {
 
     setLastRemoved(rows)
     setShowUndo(true)
-    addActivity(`Removed ${rows.length} item(s)`)
+    addActivity(`Menghapus ${rows.length} barang`)
 
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
     undoTimerRef.current = setTimeout(() => {
@@ -270,7 +278,7 @@ export default function App() {
       return
     }
 
-    addActivity(`Undid removal of ${lastRemoved.length} item(s)`)
+    addActivity(`Membatalkan penghapusan ${lastRemoved.length} barang`)
     setLastRemoved([])
     setShowUndo(false)
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
@@ -297,14 +305,37 @@ export default function App() {
       return
     }
 
-    const { data: links, error } = await supabase
+    // 1. Existing Warehouse Search
+    const { data: links, error: linksError } = await supabase
       .from('bag_items')
       .select('*')
       .in('item_id', itemIds)
 
-    if (error) {
-      addActivity(`Error: ${error.message}`)
+    if (linksError) {
+      addActivity(`Error: ${linksError.message}`)
       return
+    }
+
+    // 2. New Shipment Lookup
+    const { data: shipmentsData, error: shipError } = await supabase
+      .from('shipments')
+      .select('*')
+      .in('tracking_id', itemIds)
+
+    if (shipError) {
+      addActivity(`Error: ${shipError.message}`)
+      return
+    }
+
+    // 3. Fetch Senders for those shipments
+    const senderNames = [...new Set(shipmentsData.map(s => s.sender_name))]
+    let sendersData = []
+    if (senderNames.length > 0) {
+      const { data } = await supabase
+        .from('senders')
+        .select('*')
+        .in('sender_name', senderNames)
+      sendersData = data || []
     }
 
     const bagIds = [
@@ -329,24 +360,71 @@ export default function App() {
         x => x.item_id === itemId
       )
 
-      if (!link) {
-        return {
-          item_id: itemId,
-          bag: null
-        }
-      }
-
-      const bag = bagsData.find(
+      const bag = link ? bagsData.find(
         b => b.id === link.bag_id
-      )
+      ) : null
+
+      const shipment = shipmentsData.find(s => s.tracking_id === itemId)
+      let sender = null
+      if (shipment) {
+        sender = sendersData.find(s => s.sender_name === shipment.sender_name)
+      }
 
       return {
         item_id: itemId,
-        bag
+        bag,
+        shipment: shipment ? {
+          ...shipment,
+          sender_phone: sender?.phone
+        } : null
       }
     })
 
     setSearchResults(results)
+  }
+
+  async function viewSenderParcels(senderName) {
+    setViewingSender(senderName)
+    
+    // 1. Find all shipments for this sender
+    const { data: shipments, error } = await supabase
+      .from('shipments')
+      .select('tracking_id')
+      .eq('sender_name', senderName)
+    
+    if (error) {
+      addActivity(`Error: ${error.message}`)
+      return
+    }
+    
+    const trackingIds = shipments.map(s => s.tracking_id)
+    
+    // 2. Find which ones are in bags
+    const { data: links } = await supabase
+      .from('bag_items')
+      .select('item_id, bag_id')
+      .in('item_id', trackingIds)
+    
+    const bagIds = [...new Set(links.map(l => l.bag_id))]
+    let bagsData = []
+    if (bagIds.length > 0) {
+      const { data } = await supabase
+        .from('bags')
+        .select('id, bag_code')
+        .in('id', bagIds)
+      bagsData = data || []
+    }
+    
+    const parcels = trackingIds.map(tid => {
+      const link = links.find(l => l.item_id === tid)
+      const bag = link ? bagsData.find(b => b.id === link.bag_id) : null
+      return {
+        tracking_id: tid,
+        bag_code: bag ? bag.bag_code : 'NOT IN BAG'
+      }
+    })
+    
+    setSenderParcels(parcels)
   }
 
   function printBag(bag) {
@@ -454,10 +532,10 @@ export default function App() {
         if (decodedText.startsWith('BAG-')) {
           await openBagByCode(decodedText)
         } else {
-          if (scanItemMode) {
+          if (scanItemMode || selectedBag) {
             await addItemToBag(decodedText)
           } else {
-            addActivity(`Search: ${decodedText}`)
+            addActivity(`Cari: ${decodedText}`)
             setSearchText(decodedText)
             await searchItems(decodedText)
           }
@@ -581,7 +659,7 @@ export default function App() {
         updatedPhones: updatedPhones,
         skipped: skippedRows 
       })
-      addActivity(`Import Complete: ${importedShipments} shipments`)
+      addActivity(`Impor Selesai: ${importedShipments} data kiriman`)
       console.log(`Import Complete: Shipments: ${importedShipments}, New Senders: ${newSenders}, Updated Phones: ${updatedPhones}, Skipped: ${skippedRows}`)
       e.target.value = null // Reset input
     }
@@ -627,7 +705,7 @@ export default function App() {
     <div style={{ padding: 20, fontFamily: 'sans-serif', maxWidth: '800px', margin: '0 auto', backgroundColor: '#fdfdfd', minHeight: '100vh' }}>
       
       {/* Header with Logo */}
-      <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+      <div style={{ textAlign: 'center', marginBottom: '20px' }}>
         <img 
           src="https://files.manuscdn.com/user_upload_by_module/session_file/310519663698114786/KWpQrPdQFZsxLHLR.jpg" 
           alt="J&T Express Talang" 
@@ -638,32 +716,13 @@ export default function App() {
         </h1>
       </div>
 
-      {/* Current Bag Panel */}
-      <div style={{ 
-        ...cardStyle,
-        borderLeft: `5px solid ${JT_RED}`
-      }}>
-        <h2 style={{ marginTop: 0, color: JT_RED, fontSize: '1.1rem' }}>Current Bag</h2>
-        {selectedBag ? (
-          <div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#333' }}>
-              {selectedBag.bag_code}
-            </div>
-            <div style={{ marginTop: '5px', color: '#666' }}>
-              Items: <strong style={{ color: JT_RED }}>{bagItems.length}</strong>
-            </div>
-          </div>
-        ) : (
-          <div style={{ color: '#6c757d', fontStyle: 'italic' }}>None Selected</div>
-        )}
-      </div>
-
-      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
+      {/* TOP ACTION BAR */}
+      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap', justifyContent: 'center' }}>
         <button 
           onClick={createBag}
           style={{ ...buttonStyle, backgroundColor: '#28a745' }}
         >
-          Create Bag
+          Buat Karung
         </button>
         
         {!isScanning ? (
@@ -682,29 +741,11 @@ export default function App() {
           </button>
         )}
 
-        {selectedBag && (
-          !scanItemMode ? (
-            <button 
-              onClick={() => setScanItemMode(true)}
-              style={{ ...buttonStyle, backgroundColor: '#ffc107', color: '#000' }}
-            >
-              Start Scan Item Mode
-            </button>
-          ) : (
-            <button 
-              onClick={() => setScanItemMode(false)}
-              style={secondaryButtonStyle}
-            >
-              Stop Scan Item Mode
-            </button>
-          )
-        )}
-
         <button 
           onClick={() => fileInputRef.current.click()}
           style={{ ...buttonStyle, backgroundColor: '#007bff' }}
         >
-          Import Shipments
+          Impor Data
         </button>
         <input 
           type="file" 
@@ -715,6 +756,122 @@ export default function App() {
         />
       </div>
 
+      {/* ACTIVE BAG SECTION */}
+      {selectedBag && (
+        <div style={{ 
+          ...cardStyle,
+          borderLeft: `5px solid ${JT_RED}`,
+          backgroundColor: JT_LIGHT_RED
+        }}>
+          <h2 style={{ marginTop: 0, color: JT_RED, fontSize: '1.1rem' }}>Karung Aktif</h2>
+          <div style={{ fontSize: '1.8rem', fontWeight: 'bold', color: '#333', marginBottom: '10px' }}>
+            {selectedBag.bag_code}
+          </div>
+          <div style={{ marginBottom: '15px', color: '#666' }}>
+            Jumlah Barang: <strong style={{ color: JT_RED }}>{bagItems.length}</strong>
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+            <input
+              ref={itemInputRef}
+              type="text"
+              placeholder="Item ID"
+              value={itemCode}
+              onChange={(e) => setItemCode(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addItemToBag()}
+              style={{ flex: 1, padding: '12px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '1rem' }}
+            />
+            <button 
+              onClick={() => addItemToBag()}
+              style={{ ...buttonStyle, padding: '0 25px' }}
+            >
+              Tambah
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
+            {!isScanning ? (
+              <button 
+                onClick={startScanner}
+                style={{ ...buttonStyle, backgroundColor: JT_RED }}
+              >
+                Scan Barang
+              </button>
+            ) : (
+              <button 
+                onClick={stopScanner}
+                style={{ ...buttonStyle, backgroundColor: '#dc3545' }}
+              >
+                Tutup Scanner
+              </button>
+            )}
+            <button 
+              onClick={() => printBag(selectedBag)}
+              style={{ ...buttonStyle, backgroundColor: '#6c757d' }}
+            >
+              Cetak
+            </button>
+            <button 
+              onClick={() => setSelectedBag(null)}
+              style={{ ...buttonStyle, backgroundColor: '#333' }}
+            >
+              Tutup Karung
+            </button>
+          </div>
+
+          {/* Collapsible Item List */}
+          <div style={{ borderTop: '1px solid #eee', paddingTop: '10px' }}>
+            <button 
+              onClick={() => setIsItemsExpanded(!isItemsExpanded)}
+              style={{ 
+                width: '100%', 
+                textAlign: 'left', 
+                background: 'none', 
+                border: 'none', 
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                color: '#555',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px'
+              }}
+            >
+              {isItemsExpanded ? '▼' : '▶'} Daftar Barang ({bagItems.length})
+            </button>
+            
+            {isItemsExpanded && (
+              <div style={{ maxHeight: '300px', overflowY: 'auto', marginTop: '10px' }}>
+                {sortedBagItems.map(item => {
+                  const highlighted = highlightItems.includes(item.item_id)
+                  return (
+                    <div key={item.item_id} style={{
+                      padding: '8px 10px',
+                      marginBottom: '4px',
+                      backgroundColor: highlighted ? '#fff9c4' : 'rgba(255,255,255,0.5)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      borderRadius: '4px',
+                      borderBottom: '1px solid #f0f0f0'
+                    }}>
+                      <span style={{ fontWeight: highlighted ? 'bold' : 'normal', fontSize: '0.9rem' }}>
+                        {highlighted && '⭐ '} {item.item_id}
+                      </span>
+                      <button 
+                        onClick={() => removeItem(item.item_id)}
+                        style={{ padding: '2px 8px', backgroundColor: 'transparent', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', color: '#666' }}
+                      >
+                        Hapus
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {importStats && (
         <div style={{ 
           padding: '12px', 
@@ -723,35 +880,19 @@ export default function App() {
           borderRadius: '4px', 
           marginBottom: '20px'
         }}>
-          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: '#007bff' }}>Import Complete</div>
-          <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
-            <div>Imported Shipments: <strong>{importStats.imported}</strong></div>
-            <div>New Senders: <strong>{importStats.newSenders}</strong></div>
-            <div>Updated Phones: <strong>{importStats.updatedPhones}</strong></div>
-            <div>Skipped Rows: <strong style={{ color: JT_RED }}>{importStats.skipped}</strong></div>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px', color: '#007bff' }}>Impor Selesai</div>
+          <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', fontSize: '0.9rem' }}>
+            <div>Data Kiriman: <strong>{importStats.imported}</strong></div>
+            <div>Pengirim Baru: <strong>{importStats.newSenders}</strong></div>
+            <div>Telepon Diperbarui: <strong>{importStats.updatedPhones}</strong></div>
+            <div>Dilewati: <strong style={{ color: JT_RED }}>{importStats.skipped}</strong></div>
             <button 
               onClick={() => setImportStats(null)}
               style={{ border: 'none', background: 'none', color: '#007bff', cursor: 'pointer', fontSize: '0.8rem', padding: 0 }}
             >
-              Dismiss
+              Tutup
             </button>
           </div>
-        </div>
-      )}
-
-      {scanItemMode && (
-        <div style={{ 
-          padding: '12px', 
-          backgroundColor: JT_LIGHT_RED, 
-          border: `1px solid ${JT_RED}`, 
-          borderRadius: '4px', 
-          marginBottom: '20px',
-          fontWeight: 'bold',
-          textAlign: 'center',
-          color: JT_RED,
-          boxShadow: '0 0 10px rgba(227, 26, 26, 0.1)'
-        }}>
-          ⚠️ SCAN ITEM MODE ACTIVE
         </div>
       )}
 
@@ -763,26 +904,26 @@ export default function App() {
 
       <div style={{ display: 'flex', gap: '20px', flexDirection: window.innerWidth < 600 ? 'column' : 'row' }}>
         <div style={{ flex: 1 }}>
-          <h2 style={{ color: JT_RED, fontSize: '1.1rem' }}>Batch Search</h2>
+          <h2 style={{ color: JT_RED, fontSize: '1.1rem' }}>Pencarian</h2>
           <textarea
             rows={4}
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
-            placeholder="Scan or type item IDs (one per line)"
+            placeholder="Scan atau ketik ID barang (satu per baris)"
             style={{ width: '100%', padding: '10px', boxSizing: 'border-box', border: '1px solid #ddd', borderRadius: '4px' }}
           />
           <button
             onClick={() => searchItems()}
             style={{ ...buttonStyle, marginTop: 8, width: '100%' }}
           >
-            Search
+            Cari
           </button>
 
           {searchResults.length > 0 && (
             <div style={{ marginTop: 20 }}>
-              <h3 style={{ fontSize: '1rem' }}>Results</h3>
+              <h3 style={{ fontSize: '1rem' }}>Hasil</h3>
               <div style={{ marginBottom: 10 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem' }}>
                   <input
                     type="checkbox"
                     checked={
@@ -797,49 +938,116 @@ export default function App() {
                       }
                     }}
                   />
-                  Select All Found
+                  Pilih Semua yang Ditemukan
                 </label>
               </div>
 
               {searchResults.map(result => (
                 <div key={result.item_id} style={{
-                  padding: '10px',
-                  marginBottom: '6px',
+                  padding: '15px',
+                  marginBottom: '10px',
                   backgroundColor: result.bag ? '#e8f5e9' : '#fff5f5',
                   border: `1px solid ${result.bag ? '#c8e6c9' : '#ffcdd2'}`,
-                  borderRadius: '4px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between'
+                  borderRadius: '8px',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: result.shipment ? '10px' : '0' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {result.bag && (
+                        <input
+                          type="checkbox"
+                          checked={selectedResults.includes(result.item_id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedResults([...selectedResults, result.item_id])
+                            } else {
+                              setSelectedResults(selectedResults.filter(x => x !== result.item_id))
+                            }
+                          }}
+                        />
+                      )}
+                      <strong>{result.item_id}</strong>
+                      <span style={{ color: '#666' }}>→</span>
+                      {result.bag ? 
+                        <span style={{ fontWeight: 'bold', color: '#2e7d32' }}>{result.bag.bag_code}</span> : 
+                        <span style={{ color: JT_RED, fontWeight: 'bold' }}>TIDAK ADA DI GUDANG</span>
+                      }
+                    </div>
                     {result.bag && (
-                      <input
-                        type="checkbox"
-                        checked={selectedResults.includes(result.item_id)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedResults([...selectedResults, result.item_id])
-                          } else {
-                            setSelectedResults(selectedResults.filter(x => x !== result.item_id))
-                          }
-                        }}
-                      />
+                      <button 
+                        onClick={() => { setHighlightItems([result.item_id]); openBag(result.bag); }}
+                        style={{ padding: '4px 10px', backgroundColor: JT_WHITE, border: `1px solid ${JT_RED}`, color: JT_RED, borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
+                      >
+                        Buka
+                      </button>
                     )}
-                    <strong>{result.item_id}</strong>
-                    <span style={{ color: '#666' }}>→</span>
-                    {result.bag ? 
-                      <span style={{ fontWeight: 'bold', color: '#2e7d32' }}>{result.bag.bag_code}</span> : 
-                      <span style={{ color: JT_RED, fontWeight: 'bold' }}>NOT FOUND</span>
-                    }
                   </div>
-                  {result.bag && (
-                    <button 
-                      onClick={() => { setHighlightItems([result.item_id]); openBag(result.bag); }}
-                      style={{ padding: '4px 10px', backgroundColor: JT_WHITE, border: `1px solid ${JT_RED}`, color: JT_RED, borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
-                    >
-                      Open
-                    </button>
+
+                  {/* Shipment Lookup Information */}
+                  {result.shipment ? (
+                    <div style={{ 
+                      marginTop: '10px', 
+                      paddingTop: '10px', 
+                      borderTop: '1px dashed #ccc',
+                      fontSize: '0.9rem',
+                      color: '#333'
+                    }}>
+                      <div style={{ marginBottom: '4px' }}>
+                        <span style={{ color: '#666' }}>Pengirim:</span> <strong>{result.shipment.sender_name}</strong>
+                      </div>
+                      {result.shipment.sender_phone && (
+                        <div style={{ marginBottom: '4px' }}>
+                          <span style={{ color: '#666' }}>Telepon:</span> <strong>{result.shipment.sender_phone}</strong>
+                        </div>
+                      )}
+                      <div style={{ marginBottom: '8px' }}>
+                        <span style={{ color: '#666' }}>Penerima:</span> <strong>{result.shipment.recipient_name || '-'}</strong>
+                      </div>
+                      
+                      {/* Case C specific reason */}
+                      {!result.bag && (
+                        <div style={{ 
+                          fontSize: '0.8rem', 
+                          color: '#666', 
+                          fontStyle: 'italic',
+                          marginBottom: '10px',
+                          padding: '6px',
+                          backgroundColor: 'rgba(0,0,0,0.03)',
+                          borderRadius: '4px'
+                        }}>
+                          Alasan: Paket ada dalam catatan pengiriman tetapi saat ini tidak dimasukkan ke dalam karung gudang.
+                        </div>
+                      )}
+
+                      <button 
+                        onClick={() => viewSenderParcels(result.shipment.sender_name)}
+                        style={{ 
+                          padding: '6px 12px', 
+                          backgroundColor: '#f8f9fa', 
+                          border: '1px solid #ddd', 
+                          borderRadius: '4px', 
+                          cursor: 'pointer', 
+                          fontSize: '0.8rem',
+                          fontWeight: 'bold',
+                          color: '#555'
+                        }}
+                      >
+                        Lihat Paket Pengirim
+                      </button>
+                    </div>
+                  ) : (
+                    result.bag && (
+                      <div style={{ 
+                        marginTop: '10px', 
+                        paddingTop: '10px', 
+                        borderTop: '1px dashed #ccc',
+                        fontSize: '0.8rem',
+                        color: '#666',
+                        fontStyle: 'italic'
+                      }}>
+                        Data kiriman tidak tersedia
+                      </div>
+                    )
                   )}
                 </div>
               ))}
@@ -850,7 +1058,7 @@ export default function App() {
                   disabled={selectedResults.length === 0}
                   style={{ ...buttonStyle, width: '100%', opacity: selectedResults.length === 0 ? 0.5 : 1 }}
                 >
-                  Remove Selected ({selectedResults.length})
+                  Hapus Terpilih ({selectedResults.length})
                 </button>
               </div>
             </div>
@@ -859,7 +1067,7 @@ export default function App() {
 
         {/* Recent Activity Panel */}
         <div style={{ flex: 1, minWidth: '250px' }}>
-          <h2 style={{ color: JT_RED, fontSize: '1.1rem' }}>Recent Activity</h2>
+          <h2 style={{ color: JT_RED, fontSize: '1.1rem' }}>Aktivitas Terbaru</h2>
           <div style={{ 
             height: '300px', 
             overflowY: 'auto', 
@@ -870,7 +1078,7 @@ export default function App() {
             boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.05)'
           }}>
             {recentActivity.length === 0 ? (
-              <div style={{ color: '#999', textAlign: 'center', marginTop: '50px' }}>No recent activity</div>
+              <div style={{ color: '#999', textAlign: 'center', marginTop: '50px' }}>Tidak ada aktivitas terbaru</div>
             ) : (
               recentActivity.map(act => (
                 <div key={act.id} style={{ fontSize: '0.85rem', padding: '6px 0', borderBottom: '1px solid #f9f9f9' }}>
@@ -882,7 +1090,50 @@ export default function App() {
         </div>
       </div>
 
-      <h2 style={{ color: JT_RED, fontSize: '1.1rem', marginTop: '30px' }}>Bags</h2>
+      {/* Sender Parcels Modal-like Section */}
+      {senderParcels && (
+        <div style={{
+          marginTop: '30px',
+          padding: '20px',
+          backgroundColor: '#fff',
+          border: `2px solid #ddd`,
+          borderRadius: '12px',
+          boxShadow: '0 4px 15px rgba(0,0,0,0.1)'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <h2 style={{ margin: 0, color: '#333', fontSize: '1.2rem' }}>{viewingSender}</h2>
+            <button 
+              onClick={() => setSenderParcels(null)}
+              style={{ border: 'none', background: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#999' }}
+            >
+              ×
+            </button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', maxHeight: '300px', overflowY: 'auto', padding: '5px' }}>
+            {senderParcels.map(p => (
+              <div key={p.tracking_id} style={{
+                padding: '10px',
+                border: '1px solid #eee',
+                borderRadius: '6px',
+                backgroundColor: '#fdfdfd'
+              }}>
+                <div style={{ fontWeight: 'bold', fontSize: '0.9rem' }}>{p.tracking_id}</div>
+                <div style={{ 
+                  fontSize: '0.85rem', 
+                  color: p.bag_code === 'NOT IN BAG' ? JT_RED : '#2e7d32',
+                  fontWeight: 'bold',
+                  marginTop: '4px'
+                }}>
+                  {p.bag_code === 'NOT IN BAG' ? 'TIDAK DALAM KARUNG' : p.bag_code}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* BAG LIST */}
+      <h2 style={{ color: JT_RED, fontSize: '1.1rem', marginTop: '30px' }}>Daftar Karung</h2>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '15px' }}>
         {bags.map((bag) => (
           <div key={bag.id} style={{
@@ -893,85 +1144,25 @@ export default function App() {
           }}>
             <strong style={{ fontSize: '1rem' }}>{bag.bag_code}</strong>
             <div style={{ color: '#666', fontSize: '0.9rem', marginTop: '4px' }}>
-              Items: <span style={{ color: JT_RED, fontWeight: 'bold' }}>{bag.item_count}</span>
+              Jumlah Barang: <span style={{ color: JT_RED, fontWeight: 'bold' }}>{bag.item_count}</span>
             </div>
-            <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
               <button 
-                onClick={() => { setHighlightItems([]); openBag(bag); }}
+                onClick={() => openBag(bag)}
                 style={{ flex: 1, padding: '6px', backgroundColor: JT_WHITE, border: `1px solid ${JT_RED}`, color: JT_RED, borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
               >
-                Open
+                Buka
               </button>
               <button 
                 onClick={() => printBag(bag)}
                 style={{ flex: 1, padding: '6px', backgroundColor: '#eee', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
               >
-                Print
+                Cetak
               </button>
             </div>
           </div>
         ))}
       </div>
-
-      {selectedBag && (
-        <div style={{ 
-          marginTop: 40, 
-          padding: 20, 
-          border: `2px solid ${JT_RED}`, 
-          borderRadius: '12px',
-          backgroundColor: JT_WHITE,
-          boxShadow: '0 4px 20px rgba(227, 26, 26, 0.08)'
-        }}>
-          <h2 style={{ color: JT_RED, marginTop: 0 }}>Bag: {selectedBag.bag_code}</h2>
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-            <input
-              ref={itemInputRef}
-              type="text"
-              placeholder="Item ID"
-              value={itemCode}
-              onChange={(e) => setItemCode(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addItemToBag()}
-              style={{ flex: 1, padding: '12px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '1rem' }}
-            />
-            <button 
-              onClick={() => addItemToBag()}
-              style={{ ...buttonStyle, padding: '0 25px' }}
-            >
-              Add Item
-            </button>
-          </div>
-
-          <h3 style={{ fontSize: '1.1rem', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>
-            Items ({bagItems.length})
-          </h3>
-          <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-            {sortedBagItems.map(item => {
-              const highlighted = highlightItems.includes(item.item_id)
-              return (
-                <div key={item.item_id} style={{
-                  padding: '10px',
-                  marginBottom: '4px',
-                  backgroundColor: highlighted ? '#fff9c4' : 'transparent',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  borderBottom: '1px solid #f0f0f0'
-                }}>
-                  <span style={{ fontWeight: highlighted ? 'bold' : 'normal' }}>
-                    {highlighted && '⭐ '} {item.item_id}
-                  </span>
-                  <button 
-                    onClick={() => removeItem(item.item_id)}
-                    style={{ padding: '4px 10px', backgroundColor: JT_WHITE, border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
-                  >
-                    Remove
-                  </button>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
 
       {showUndo && lastRemoved.length > 0 && (
         <div style={{
@@ -980,11 +1171,11 @@ export default function App() {
           zIndex: 1000, boxShadow: '0 8px 25px rgba(0,0,0,0.4)',
           display: 'flex', alignItems: 'center', gap: '20px', minWidth: '300px', justifyContent: 'center'
         }}>
-          <span style={{ fontWeight: 'bold' }}>Removed {lastRemoved.length} item(s)</span>
+          <span style={{ fontWeight: 'bold' }}>Menghapus {lastRemoved.length} barang</span>
           <button onClick={undoRemove} style={{
             padding: '6px 20px', backgroundColor: JT_RED, color: '#fff', border: 'none',
             borderRadius: '20px', cursor: 'pointer', fontWeight: 'bold', textTransform: 'uppercase', fontSize: '0.8rem'
-          }}>Undo</button>
+          }}>Batalkan</button>
         </div>
       )}
     </div>

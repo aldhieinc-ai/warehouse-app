@@ -22,8 +22,8 @@ export default function App() {
   const [selectedResults, setSelectedResults] = useState([])
   const [lastRemoved, setLastRemoved] = useState([])
   const [showUndo, setShowUndo] = useState(false)
-  const [scanItemMode, setScanItemMode] = useState(false)
   const [isScanning, setIsScanning] = useState(false)
+  const [scannerType, setScannerType] = useState(null) // 'global' or 'add-item'
   const [recentActivity, setRecentActivity] = useState([])
   const [importStats, setImportStats] = useState(null)
   
@@ -507,7 +507,8 @@ export default function App() {
     }
   }
 
-  const startScanner = () => {
+  const startScanner = (type = 'global') => {
+    setScannerType(type)
     setIsScanning(true)
     setTimeout(() => {
       const scanner = new Html5QrcodeScanner('reader', {
@@ -529,11 +530,13 @@ export default function App() {
         }
         lastScannedRef.current = { value: decodedText, time: now }
 
-        if (decodedText.startsWith('BAG-')) {
-          await openBagByCode(decodedText)
+        if (type === 'add-item') {
+          // Inside Karung Aktif - Always add to bag
+          await addItemToBag(decodedText)
         } else {
-          if (scanItemMode || selectedBag) {
-            await addItemToBag(decodedText)
+          // Global Scan - Never add to bag
+          if (decodedText.startsWith('BAG-')) {
+            await openBagByCode(decodedText)
           } else {
             addActivity(`Cari: ${decodedText}`)
             setSearchText(decodedText)
@@ -558,6 +561,7 @@ export default function App() {
       }
     }
     setIsScanning(false)
+    setScannerType(null)
   }
 
   // Shipment Import Logic
@@ -727,7 +731,7 @@ export default function App() {
         
         {!isScanning ? (
           <button 
-            onClick={startScanner}
+            onClick={() => startScanner('global')}
             style={buttonStyle}
           >
             Scan
@@ -792,10 +796,10 @@ export default function App() {
           <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
             {!isScanning ? (
               <button 
-                onClick={startScanner}
+                onClick={() => startScanner('add-item')}
                 style={{ ...buttonStyle, backgroundColor: JT_RED }}
               >
-                Scan Barang
+                Tambah via Scan
               </button>
             ) : (
               <button 

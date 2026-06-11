@@ -26,6 +26,9 @@ export default function App() {
   const [scannerType, setScannerType] = useState(null) // 'global' or 'add-item'
   const [recentActivity, setRecentActivity] = useState([])
   const [importStats, setImportStats] = useState(null)
+  const [toast, setToast] = useState(null)
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [exportOption, setExportOption] = useState('active_bag')
   
   // New states for Shipment Lookup
   const [senderParcels, setSenderParcels] = useState(null)
@@ -39,16 +42,46 @@ export default function App() {
   const scannerRef = useRef(null)
   const lastScannedRef = useRef({ value: '', time: 0 })
   const fileInputRef = useRef(null)
+  const toastTimerRef = useRef(null)
+
+  // Audio refs
+  const successAudio = useRef(new Audio('/success.mp3'))
+  const errorAudio = useRef(new Audio('/error.mp3'))
 
   useEffect(() => {
     loadBags()
     return () => {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
       if (scannerRef.current) {
         scannerRef.current.clear().catch(err => console.error('Failed to clear scanner', err))
       }
     }
   }, [])
+
+  function showToast(type, message, subtext = null, action = null) {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    
+    setToast({ type, message, subtext, action })
+    
+    const duration = type === 'success' ? 2000 : 4000
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null)
+    }, duration)
+  }
+
+  function playFeedback(type) {
+    if (type === 'success') {
+      successAudio.current.currentTime = 0
+      successAudio.current.play().catch(() => {})
+    } else {
+      errorAudio.current.currentTime = 0
+      errorAudio.current.play().catch(() => {})
+      if (navigator.vibrate) {
+        navigator.vibrate(500)
+      }
+    }
+  }
 
   function addActivity(text) {
     setRecentActivity(prev => [{
@@ -161,19 +194,44 @@ export default function App() {
   async function addItemToBag(codeToUse) {
     const targetBag = selectedBag
     if (!targetBag) {
+      playFeedback('error')
+      showToast('error', 'Tidak ada karung aktif')
       addActivity('Error: Buka karung terlebih dahulu')
       return
     }
 
     const code = (codeToUse || itemCode).trim()
     if (!code) {
+      playFeedback('error')
+      showToast('error', 'Masukkan ID barang')
       addActivity('Error: Masukkan ID barang')
       return
     }
 
-    const isDuplicate = bagItems.some(i => i.item_id === code)
-    if (isDuplicate) {
-      addActivity(`Sudah ada di karung saat ini: ${code}`)
+    // Improved Duplicate Check
+    const { data: existingLink, error: checkError } = await supabase
+      .from('bag_items')
+      .select('*, bags(*)')
+      .eq('item_id', code)
+      .maybeSingle()
+
+    if (checkError) {
+      playFeedback('error')
+      showToast('error', 'Database error', checkError.message)
+      addActivity(`Error: ${checkError.message}`)
+      return
+    }
+
+    if (existingLink) {
+      playFeedback('error')
+      const existingBag = existingLink.bags
+      showToast(
+        'error', 
+        'Barang sudah ada', 
+        `Karung: ${existingBag.bag_code}`,
+        { label: 'Buka Karung', onClick: () => openBag(existingBag) }
+      )
+      addActivity(`Gagal: ${code} sudah ada di ${existingBag.bag_code}`)
       setItemCode('')
       return
     }
@@ -185,6 +243,8 @@ export default function App() {
       })
 
     if (itemError) {
+      playFeedback('error')
+      showToast('error', 'Database error', itemError.message)
       addActivity(`Error: ${itemError.message}`)
       return
     }
@@ -197,10 +257,14 @@ export default function App() {
       })
 
     if (bagItemError) {
+      playFeedback('error')
+      showToast('error', 'Database error', bagItemError.message)
       addActivity(`Error: ${bagItemError.message}`)
       return
     }
 
+    playFeedback('success')
+    showToast('success', 'Ditambahkan', code)
     addActivity(`Ditambahkan: ${code}`)
     setItemCode('')
     await loadBagItems(targetBag.id)
@@ -670,6 +734,90 @@ export default function App() {
     reader.readAsArrayBuffer(file)
   }
 
+  // CSV Export Logic
+  function downloadCSV(filename, rows) {
+    if (!rows || rows.length === 0) {
+      showToast('error', 'Data tidak ditemukan')
+      return
+    }
+
+    const headers = Object.keys(rows[0])
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => headers.map(header => {
+        const val = row[header] === null || row[header] === undefined ? '' : String(row[header])
+        return `"${val.replace(/"/g, '""')}"`
+      }).join(','))
+    ].join('\n')
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    const url = URL.createObjectURL(blob)
+    link.setAttribute('href', url)
+    link.setAttribute('download', filename)
+    link.style.visibility = 'hidden'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    
+    showToast('success', 'CSV berhasil dibuat')
+  }
+
+  async function handleExport() {
+    setShowExportModal(false)
+    
+    try {
+      if (exportOption === 'active_bag') {
+        if (!selectedBag) {
+          showToast('error', 'Tidak ada karung aktif')
+          return
+        }
+        const rows = bagItems.map(item => ({ tracking_id: item.item_id }))
+        downloadCSV(`karung_${selectedBag.bag_code}.csv`, rows)
+      } 
+      else if (exportOption === 'no_sender') {
+        // Items in warehouse but no shipment record
+        const { data: items } = await supabase.from('items').select('item_id')
+        const { data: shipments } = await supabase.from('shipments').select('tracking_id')
+        
+        const shipmentIds = new Set(shipments.map(s => s.tracking_id))
+        const rows = items
+          .filter(item => !shipmentIds.has(item.item_id))
+          .map(item => ({ tracking_id: item.item_id }))
+        
+        downloadCSV('barang_tanpa_pengirim.csv', rows)
+      }
+      else if (exportOption === 'no_phone') {
+        // Senders with NULL or empty phone
+        const { data: senders } = await supabase
+          .from('senders')
+          .select('sender_name, phone')
+          .or('phone.is.null,phone.eq.""')
+        
+        downloadCSV('pengirim_tanpa_telepon.csv', senders)
+      }
+      else if (exportOption === 'not_in_bag') {
+        // Shipment exists but not in bag_items
+        const { data: shipments } = await supabase.from('shipments').select('tracking_id, sender_name, recipient_name')
+        const { data: bagItemsData } = await supabase.from('bag_items').select('item_id')
+        
+        const bagItemIds = new Set(bagItemsData.map(bi => bi.item_id))
+        const rows = shipments
+          .filter(s => !bagItemIds.has(s.tracking_id))
+          .map(s => ({
+            tracking_id: s.tracking_id,
+            sender_name: s.sender_name,
+            recipient_name: s.recipient_name
+          }))
+        
+        downloadCSV('barang_tidak_di_karung.csv', rows)
+      }
+    } catch (err) {
+      console.error(err)
+      showToast('error', 'Gagal mengekspor data')
+    }
+  }
+
   const sortedBagItems = [
     ...bagItems.filter(item =>
       highlightItems.includes(item.item_id)
@@ -708,6 +856,106 @@ export default function App() {
   return (
     <div style={{ padding: 20, fontFamily: 'sans-serif', maxWidth: '800px', margin: '0 auto', backgroundColor: '#fdfdfd', minHeight: '100vh' }}>
       
+      {/* Toast System */}
+      {toast && (
+        <div style={{
+          position: 'fixed',
+          top: '20px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 9999,
+          width: '90%',
+          maxWidth: '400px',
+          padding: '16px',
+          borderRadius: '12px',
+          backgroundColor: toast.type === 'success' ? '#2e7d32' : JT_RED,
+          color: '#fff',
+          boxShadow: '0 10px 30px rgba(0,0,0,0.2)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+          animation: 'slideDown 0.3s ease-out'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '1.5rem' }}>{toast.type === 'success' ? '✓' : '✗'}</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 'bold', fontSize: '1.1rem' }}>{toast.message}</div>
+              {toast.subtext && <div style={{ fontSize: '0.9rem', opacity: 0.9 }}>{toast.subtext}</div>}
+            </div>
+          </div>
+          {toast.action && (
+            <button 
+              onClick={() => { toast.action.onClick(); setToast(null); }}
+              style={{
+                marginTop: '5px',
+                padding: '8px',
+                backgroundColor: 'rgba(255,255,255,0.2)',
+                border: 'none',
+                borderRadius: '6px',
+                color: '#fff',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              {toast.action.label}
+            </button>
+          )}
+          <style>{`
+            @keyframes slideDown {
+              from { transform: translate(-50%, -100%); opacity: 0; }
+              to { transform: translate(-50%, 0); opacity: 1; }
+            }
+          `}</style>
+        </div>
+      )}
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000,
+          padding: '20px'
+        }}>
+          <div style={{
+            backgroundColor: '#fff',
+            padding: '25px',
+            borderRadius: '12px',
+            width: '100%',
+            maxWidth: '400px',
+            boxShadow: '0 10px 40px rgba(0,0,0,0.2)'
+          }}>
+            <h2 style={{ marginTop: 0, color: '#333', fontSize: '1.2rem', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>EKSPOR DATA</h2>
+            <div style={{ margin: '20px 0', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                <input type="radio" name="export" value="active_bag" checked={exportOption === 'active_bag'} onChange={e => setExportOption(e.target.value)} />
+                Karung Aktif
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                <input type="radio" name="export" value="no_sender" checked={exportOption === 'no_sender'} onChange={e => setExportOption(e.target.value)} />
+                Barang Tanpa Data Pengirim
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                <input type="radio" name="export" value="no_phone" checked={exportOption === 'no_phone'} onChange={e => setExportOption(e.target.value)} />
+                Pengirim Tanpa Telepon
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                <input type="radio" name="export" value="not_in_bag" checked={exportOption === 'not_in_bag'} onChange={e => setExportOption(e.target.value)} />
+                Barang Tidak Di Karung
+              </label>
+            </div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={handleExport} style={{ ...buttonStyle, flex: 1 }}>Ekspor</button>
+              <button onClick={() => setShowExportModal(false)} style={{ ...secondaryButtonStyle, flex: 1 }}>Batal</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header with Logo */}
       <div style={{ textAlign: 'center', marginBottom: '20px' }}>
         <img 
@@ -758,6 +1006,13 @@ export default function App() {
           accept=".xlsx" 
           onChange={handleImport} 
         />
+
+        <button 
+          onClick={() => setShowExportModal(true)}
+          style={{ ...buttonStyle, backgroundColor: '#6f42c1' }}
+        >
+          Ekspor
+        </button>
       </div>
 
       {/* ACTIVE BAG SECTION */}
